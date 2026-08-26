@@ -1,0 +1,9 @@
+podcast_analytics:
+  outputs:
+    dev:
+      type: duckdb
+      path: dev.duckdb
+      schema: analytics_dev
+      threads: 1
+
+  target: dev

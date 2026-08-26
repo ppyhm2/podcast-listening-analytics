@@ -1,0 +1,115 @@
+version: 2
+
+# Test coverage note: unique/not_null are applied only to each model's natural or
+# surrogate key here, not to every column. The six boolean flags and derived
+# fields on stg_event_logs are covered in aggregate by the singular tests
+# in tests/ (assert_capped_duration_never_exceeds_episode_length,
+# assert_rejected_rows_have_a_reason, assert_no_event_id_in_both_fact_and_rejected,
+# assert_valid_plus_rejected_equals_total_staged) and by the staging logic itself.
+
+
+models:
+  - name: stg_users
+    description: >
+      Cleaned, type-cast version of the raw users seed. One row per user, a
+      straight pass-through of user_id and country with signup_date cast to a
+      proper date. No rows are ever excluded here, users.csv has no missing or
+      malformed values.
+    columns:
+      - name: user_id
+        description: Natural key from the source, unique per user.
+        tests:
+          - unique
+          - not_null
+      - name: signup_date
+        description: Date the user signed up. A plain cast (not try_cast), since
+          this column has never shown a malformed value in the source.
+      - name: country
+        description: User's country, as provided in the source. No
+          standardisation applied (e.g. no country-code lookup).
+
+  - name: stg_episodes
+    description: >
+      Cleaned, type-cast version of the raw episodes seed. One row per episode,
+      a pass-through of episode_id, podcast_id, and title, with release_date
+      cast to a proper date. No rows are ever excluded here, episodes.csv has
+      no missing or malformed values.
+    columns:
+      - name: episode_id
+        description: >
+          Natural key from the source, unique per episode.
+        tests:
+          - unique
+          - not_null
+      - name: podcast_id
+        description: Identifier for the podcast this episode belongs to. No
+          source table exists for podcasts themselves, see dim_episodes for how
+          podcast-level analysis is handled.
+      - name: title
+        description: Episode title. Generic in this dataset ("Episode N"),
+          carries little information.
+      - name: release_date
+        description: Date the episode was released.
+      - name: duration_seconds
+        description: Total length of the episode in seconds.
+
+  - name: stg_event_logs
+    description: >
+      Cleaned, flagged version of the raw event_logs seed. This is the single
+      point where every validity check is applied. Every downstream model
+      (fct_listening_events, rejected_event_logs) reads from this output rather
+      than re-implementing any of this logic. One row per distinct raw event,
+      valid or not: rows identical in every source column collapse to a single
+      event_id and are deduplicated here.
+    columns:
+      - name: event_id
+        description: >
+          Surrogate key, hashed on the raw, unparsed source columns, since
+          event_logs has no natural key of its own. Generated once here so it
+          stays consistent across every downstream model.
+        tests:
+          - unique
+          - not_null
+      - name: event_type
+        description: One of play, pause, seek, complete, download, or null if
+          missing in the source.
+      - name: user_id
+        description: References users.user_id. Null if missing in the source.
+      - name: episode_id
+        description: References episodes.episode_id. Null if missing in the
+          source.
+      - name: event_timestamp_raw
+        description: Unparsed timestamp string exactly as it appeared in the
+          source, retained for audit purposes.
+      - name: event_datetime
+        description: >
+          Parsed timestamp via try_cast, null if the raw value was missing or
+          unparseable (e.g. the literal string 'malformed-date').
+      - name: duration
+        description: Raw listen duration in seconds. Only populated for play
+          and complete events.
+      - name: is_missing_event_type
+        description: True if event_type was null in the source.
+      - name: is_missing_user_id
+        description: True if user_id was null in the source.
+      - name: is_missing_episode_id
+        description: True if episode_id was null in the source.
+      - name: is_missing_timestamp
+        description: True if the raw timestamp was null in the source.
+      - name: is_malformed_timestamp
+        description: True if the raw timestamp was present but could not be
+          parsed (a generic check, not hardcoded to a specific string).
+      - name: is_missing_duration
+        description: True if event_type is play or complete but duration was
+          null.
+      - name: is_rejected
+        description: True if any of the six is_missing_*/is_malformed_* flags
+          above are true. Determines whether a row lands in
+          fct_listening_events or rejected_event_logs.
+      - name: rejection_reason_count
+        description: Count of how many of the six checks failed for this row
+          (0 for valid rows, up to 2 observed in this dataset).
+      - name: rejection_reason_summary
+        description: Human-readable, comma-separated list of failed check
+          names, derived from the boolean flags above, never entered
+          independently.

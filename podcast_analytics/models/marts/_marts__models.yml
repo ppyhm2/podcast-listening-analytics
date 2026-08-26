@@ -1,0 +1,268 @@
+version: 2
+
+# See _staging__models.yml for the general test-coverage philosophy (natural/
+# surrogate keys only; derived and aggregated columns are covered by the four
+# singular tests in tests/ rather than generic tests here).
+
+
+models:
+  - name: dim_users
+    description: >
+      One row per user. Adds signup_year and signup_month for convenient cohort
+      slicing without recomputing from signup_date each time.
+    columns:
+      - name: user_id
+        description: Natural key from the source, unique per user.
+        tests:
+          - unique
+          - not_null
+      - name: country
+        description: User's country.
+      - name: signup_date
+        description: Date the user signed up.
+      - name: signup_year
+        description: Year extracted from signup_date.
+      - name: signup_month
+        description: Month extracted from signup_date.
+      - name: data_refreshed_on
+        description: >
+          Timestamp the row was produced. This model is a view, so the value
+          evaluates at query time rather than at build time.
+
+  - name: dim_episodes
+    description: >
+      One row per episode. Adds duration in minutes, release year/month, and a
+      length bucket for convenience alongside the raw source columns.
+    columns:
+      - name: episode_id
+        description: >
+          Natural key from the source, unique per episode.
+        tests:
+          - unique
+          - not_null
+      - name: podcast_id
+        description: Identifier for the podcast this episode belongs to.
+      - name: title
+        description: Episode title.
+      - name: release_date
+        description: Date the episode was released.
+      - name: duration_seconds
+        description: Episode length in seconds, as provided in the source.
+      - name: duration_minutes
+        description: Episode length in minutes, derived from duration_seconds.
+      - name: release_year
+        description: Year extracted from release_date.
+      - name: release_month
+        description: Month extracted from release_date.
+      - name: episode_length_bucket
+        description: >
+          short (<20 min), medium (20-45 min), or long (45+ min). Thresholds are
+          provisional, chosen by eyeballing the duration distribution, not a
+          confirmed business definition. Should be signed off by a stakeholder
+          before being treated as canonical.
+        tests:
+          # Same reasoning as event_type: catches a typo or unexpected category
+          # early rather than it silently producing a bad group downstream.
+          - accepted_values:
+              arguments:
+                values: ['short', 'medium', 'long']
+
+  - name: fct_listening_events
+    description: >
+      One row per valid interaction event (play, pause, seek, complete, download). Only
+      rows that passed every check in stg_event_logs, rejected rows live
+      separately in rejected_event_logs. This is the primary fact table
+      supporting every analysis in this project.
+    columns:
+      - name: event_id
+        description: Surrogate key, unique per event.
+        tests:
+          - unique
+          - not_null
+      - name: user_id
+        description: References dim_users.user_id.
+        tests:
+          # Confirms referential integrity explicitly rather than assuming it,
+          # every user_id here genuinely exists in dim_users.
+          - relationships:
+              arguments:
+                to: ref('dim_users')
+                field: user_id
+      - name: episode_id
+        description: References dim_episodes.episode_id.
+        tests:
+          # Same reasoning as user_id above.
+          - relationships:
+              arguments:
+                to: ref('dim_episodes')
+                field: episode_id
+      - name: event_type
+        description: One of play, pause, seek, complete, download.
+        tests:
+          # Catches a typo or an unexpected new category early (fails loudly)
+          # rather than it silently appearing as an unrecognised group in an
+          # analysis downstream.
+          - accepted_values:
+              arguments:
+                values: ['play', 'pause', 'seek', 'complete', 'download']
+      - name: event_datetime
+        description: Parsed timestamp of the event.
+      - name: event_date
+        description: Date part of event_datetime, for daily-grain joins.
+      - name: event_year
+        description: Year part of event_datetime.
+      - name: event_month
+        description: Month part of event_datetime.
+      - name: event_hour_of_day
+        description: Hour part of event_datetime. Exposed for downstream use,
+          not analysed as part of this project's own deliverables.
+      - name: event_day_of_week
+        description: Day name (e.g. Monday) of event_datetime. Exposed for
+          downstream use, not analysed as part of this project's own
+          deliverables.
+      - name: duration_raw_seconds
+        description: >
+          Original, untouched listen duration from the source. Retained for
+          audit purposes only, never used in any calculation. Null for
+          pause, seek and download events. See duration_capped_seconds.
+      - name: duration_capped_seconds
+        description: >
+          duration_raw_seconds capped at the episode's own length. This is the
+          ONLY duration field that should feed any aggregate or rate
+          calculation: 47% of play/complete rows have a raw duration exceeding
+          episode length, possibly due to ad insertion or cumulative replay
+          counting. Null for pause, seek and download events, which carry no
+          duration.
+      - name: duration_exceeds_episode_length
+        description: True if duration_raw_seconds exceeded the episode's
+          length. False (never null) for pause, seek and download events, which
+          have no duration to have exceeded anything.
+      - name: is_listen_event
+        description: >
+          True if event_type is play or complete. The project-wide definition
+          of "listened", used consistently by every downstream model rather
+          than reimplemented. pause and seek are excluded, since without
+          session data they can't independently confirm a listen occurred, and
+          download is excluded as it signals intent rather than consumption.
+      - name: is_before_episode_release
+        description: >
+          True if the event is dated before its episode's release_date. Around
+          21% of valid events are, which is impossible in reality. Flagged
+          rather than rejected: unlike a missing identifier this does not make
+          the row unusable, and excluding a fifth of the dataset would be a
+          larger intervention than the anomaly warrants.
+      - name: episode_duration_seconds
+        description: >
+          The episode's own length, carried onto the fact so listen_through_rate
+          can be derived here rather than every consumer re-joining dim_episodes.
+      - name: listen_through_rate
+        description: >
+          duration_capped_seconds over episode_duration_seconds. The project's
+          single definition of listen-through rate: every consumer reads this
+          column rather than re-deriving the ratio. Null for non-listen events.
+      - name: data_refreshed_on
+        description: >
+          Timestamp the row was produced. This model is a view, so the value
+          evaluates at query time rather than at build time.
+
+  - name: rejected_event_logs
+    description: >
+      One row per event that failed at least one validity check in
+      stg_event_logs. Kept visible and auditable rather than silently
+      discarded. A pure filter, all flags and derived fields were already
+      computed once in stg_event_logs.
+    columns:
+      - name: event_id
+        description: Surrogate key, unique per rejected event.
+        tests:
+          - unique
+          - not_null
+      - name: event_type
+        description: Raw event type, possibly null.
+      - name: user_id
+        description: Raw user_id, possibly null.
+      - name: episode_id
+        description: Raw episode_id, possibly null.
+      - name: event_timestamp_raw
+        description: Raw, unparsed timestamp string.
+      - name: duration
+        description: Raw duration, possibly null.
+      - name: is_missing_event_type
+        description: See stg_event_logs.
+      - name: is_missing_user_id
+        description: See stg_event_logs.
+      - name: is_missing_episode_id
+        description: See stg_event_logs.
+      - name: is_missing_timestamp
+        description: See stg_event_logs.
+      - name: is_malformed_timestamp
+        description: See stg_event_logs.
+      - name: is_missing_duration
+        description: See stg_event_logs.
+      - name: rejection_reason_count
+        description: See stg_event_logs.
+      - name: rejection_reason_summary
+        description: See stg_event_logs.
+
+  - name: mart_user_engagement
+    description: >
+      One row per user (all 400, via a left join from dim_users, even if a
+      user's every event was rejected). Aggregates fct_listening_events to
+      user grain, combining user-level engagement stats and days-to-first-listen
+      into one reusable model.
+    columns:
+      - name: user_id
+        description: References dim_users.user_id.
+        tests:
+          - unique
+          - not_null
+      - name: country
+        description: From dim_users.
+      - name: signup_date
+        description: From dim_users.
+      - name: total_valid_events
+        description: Count of all valid events (any type) for this user.
+      - name: total_listen_events
+        description: Count of play/complete events for this user.
+      - name: distinct_episodes_listened
+        description: >
+          Count of distinct episodes this user has a listen event for. Null,
+          not zero, for a user with no listens: count() returns 0 in that case,
+          which would be indistinguishable from having listened to nothing by
+          chance, so it is wrapped in nullif.
+      - name: distinct_podcasts_listened
+        description: >
+          Count of distinct podcasts this user has a listen event for. Null for
+          a user with no listens, as above.
+      - name: total_capped_listen_seconds
+        description: >
+          Sum of duration_capped_seconds across this user's listen events. Named
+          for what it measures rather than "listen time": without session
+          boundaries, actual time spent listening is not derivable from this
+          data. Null for a user with no listens.
+      - name: avg_listen_through_rate
+        description: >
+          Mean of this user's event-level listen_through_rate values. Unweighted,
+          so every listen event counts equally regardless of episode length. A
+          ratio of summed durations would weight long episodes more heavily and
+          answer a different question.
+      - name: first_event_date
+        description: Earliest event date for this user, any event type.
+      - name: first_listen_date
+        description: >
+          Earliest date this user actually listened (play or complete). Later
+          than first_event_date for anyone whose first interaction was a
+          download, pause or seek. Null if they never listened.
+      - name: last_event_date
+        description: Most recent event date for this user, any event type.
+      - name: distinct_days_active
+        description: Count of distinct dates with at least one event.
+      - name: days_to_first_listen
+        description: >
+          Days between signup_date and first_listen_date. Built from the listen
+          date rather than first_event_date, so the name matches what it
+          measures. Null if this user never listened.
+      - name: data_refreshed_on
+        description: >
+          Timestamp the row was produced. This model is a view, so the value
+          evaluates at query time rather than at build time.

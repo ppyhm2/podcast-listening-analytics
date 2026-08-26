@@ -1,0 +1,26 @@
+name: 'podcast_analytics'
+version: '1.0.0'
+require-dbt-version: [">=1.10.0", "<1.11.0"]
+
+# This setting configures which "profile" dbt uses for this project.
+profile: 'podcast_analytics'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+
+clean-targets:         # directories to be removed by `dbt clean`
+  - "target"
+  - "dbt_packages"
+
+
+# Everything is a view. The seed is fully reloaded on each run, so there is no
+# incremental state to preserve and no dataset large enough for materialisation to
+# matter. See the modelling section of the README for what would change in
+# production.
+models:
+  podcast_analytics:
+    +materialized: view
+
+

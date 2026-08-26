@@ -1,0 +1,31 @@
+version: 2
+
+models:
+  - name: int_user_daily_activity
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - user_id
+              - event_date
+    description: >
+      One row per user per day with at least one listen event (play or
+      complete, per is_listen_event). Backs the multi-episode-day analysis and
+      available for other daily-activity questions.
+    columns:
+      - name: user_id
+        description: References dim_users.user_id.
+      - name: event_date
+        description: The activity date.
+      - name: distinct_episodes
+        description: Count of distinct episodes listened to by this user on
+          this date. The multi-episode-day analysis filters on this being >= 3.
+      - name: total_listen_events
+        description: >
+          Count of listen events (play/complete) by this user on this date.
+          Note mart_user_engagement carries a column of the same name at user
+          grain, alongside total_valid_events which counts every event type.
+      - name: data_refreshed_on
+        description: >
+          Timestamp the row was produced. Note this model is a view, so the
+          value evaluates at query time rather than at build time.
